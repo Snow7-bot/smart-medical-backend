@@ -29,3 +29,8 @@ mybatis-plus:
   global-config:
     db-config:
       id-type: auto
+
+# 文件上传路径
+app:
+  upload:
+    dir: /Users/w1nstep/Downloads/smart-medical-backend/uploads

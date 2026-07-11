@@ -1,8 +1,11 @@
 package com.smartmedical.medical.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartmedical.common.BusinessException;
 import com.smartmedical.common.ErrorCode;
+import com.smartmedical.llm.DeepSeekClient;
+import com.smartmedical.llm.QwenOcrClient;
 import com.smartmedical.medical.entity.MedicalRecord;
 import com.smartmedical.medical.mapper.MedicalRecordMapper;
 import lombok.RequiredArgsConstructor;
@@ -16,25 +19,35 @@ import java.io.IOException;
 import java.time.LocalDate;
 import java.util.*;
 
+import org.apache.pdfbox.Loader;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.text.PDFTextStripper;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class MedicalRecordService {
 
     private final MedicalRecordMapper mapper;
+    private final DeepSeekClient deepSeek;
+    private final QwenOcrClient qwenOcr;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Value("${app.upload.dir:uploads}")
     private String uploadDir;
 
     public MedicalRecord upload(Long userId, Long patientId, MultipartFile file, String recordDate) throws IOException {
-        return saveFile(userId, patientId, file, recordDate, true);
+        MedicalRecord r = saveFile(userId, patientId, file, recordDate);
+        // 自动 OCR 提取 + AI 分析
+        analyzeRecord(r, file);
+        return r;
     }
 
     public MedicalRecord uploadSync(Long userId, Long patientId, MultipartFile file) throws IOException {
-        return saveFile(userId, patientId, file, null, false);
+        return saveFile(userId, patientId, file, null);
     }
 
-    private MedicalRecord saveFile(Long userId, Long patientId, MultipartFile file, String recordDate, boolean autoParse) throws IOException {
+    private MedicalRecord saveFile(Long userId, Long patientId, MultipartFile file, String recordDate) throws IOException {
         File dir = new File(uploadDir, "medical");
         if (!dir.exists()) dir.mkdirs();
 
@@ -50,29 +63,120 @@ public class MedicalRecordService {
         r.setPatientId(patientId);
         r.setFileUrl("/uploads/medical/" + fileName);
         r.setFileType(ext.toLowerCase().contains("pdf") ? "pdf" : "image");
-        r.setParseStatus(autoParse ? "processing" : "pending");
-        if (recordDate != null) r.setRecordDate(LocalDate.parse(recordDate));
+        r.setParseStatus("pending");
+        if (recordDate != null && !recordDate.isEmpty()) r.setRecordDate(LocalDate.parse(recordDate));
         r.setParsedData("{}");
         mapper.insert(r);
-
-        // Mock 解析（实际应异步 OCR）
-        if (autoParse) {
-            r.setParseStatus("done");
-            r.setParsedData("{\"diagnosis\":\"待专业医生解读\",\"status\":\"auto_parsed\"}");
-            mapper.updateById(r);
-        }
-
         return r;
     }
 
+    /** OCR 提取 + AI 分析 */
+    private void analyzeRecord(MedicalRecord r, MultipartFile file) {
+        try {
+            r.setParseStatus("processing");
+            mapper.updateById(r);
+
+            // 1. 提取文本
+            String extractedText = extractText(r.getFileUrl());
+            if (extractedText == null || extractedText.isBlank()) {
+                r.setParseStatus("done");
+                r.setParsedData("{\"summary\":\"未能识别文件内容\",\"status\":\"no_text\"}");
+                mapper.updateById(r);
+                return;
+            }
+
+            // 2. DeepSeek 医疗分析
+            String analysis = deepSeek.chat(
+                    "你是专业医学文档分析助手。请用通俗易懂的大白话，分析以下病历内容。按这个格式回复：" +
+                    "「主要问题」一句话概括；「重要发现」列出2-3个关键指标；「用药情况」列出涉及的药物；「建议」给出1-2条通俗建议。200字以内。",
+                    extractedText);
+
+            // 3. 存储分析结果
+            Map<String, Object> parsed = new LinkedHashMap<>();
+            parsed.put("status", "analyzed");
+            parsed.put("analysis", analysis);
+            parsed.put("raw_text", extractedText.substring(0, Math.min(500, extractedText.length())));
+
+            r.setParsedData(objectMapper.writeValueAsString(parsed));
+            r.setParseStatus("done");
+            mapper.updateById(r);
+
+        } catch (Exception e) {
+            log.error("病历分析失败", e);
+            r.setParseStatus("failed");
+            r.setParsedData("{\"error\":\"分析失败\"}");
+            mapper.updateById(r);
+        }
+    }
+
+    /** 提取文件中的文本 */
+    private String extractText(String fileUrl) throws IOException {
+        File file = new File(uploadDir, fileUrl.substring("/uploads/".length()));
+        String name = file.getName().toLowerCase();
+
+        if (!file.exists()) return null;
+
+        // PDF → PDFBox 提取
+        if (name.endsWith(".pdf")) {
+            try (PDDocument doc = Loader.loadPDF(file)) {
+                PDFTextStripper stripper = new PDFTextStripper();
+                String text = stripper.getText(doc);
+                return text.isBlank() ? null : text.substring(0, Math.min(3000, text.length()));
+            }
+        }
+
+        // TXT → 直接读
+        if (name.endsWith(".txt")) {
+            return new String(java.nio.file.Files.readAllBytes(file.toPath()));
+        }
+
+        // 图片 — 千问 VL OCR
+        return qwenOcr.extractText(file);
+    }
+
+    /** 触发重新解析 */
     public MedicalRecord parse(Long recordId) {
         MedicalRecord r = mapper.selectById(recordId);
         if (r == null) throw new BusinessException(ErrorCode.NOT_FOUND);
         r.setParseStatus("done");
-        r.setParsedData("{\"diagnosis\":\"待专业医生解读\",\"status\":\"parsed\"}");
+        try {
+            Map<String, Object> parsed = objectMapper.readValue(
+                    r.getParsedData() != null ? r.getParsedData() : "{}", Map.class);
+            parsed.put("status", "re-parsed");
+            r.setParsedData(objectMapper.writeValueAsString(parsed));
+        } catch (Exception e) {
+            r.setParsedData("{\"status\":\"parsed\"}");
+        }
         mapper.updateById(r);
         return r;
     }
+
+    /** 获取 AI 分析摘要 */
+    public Map<String, Object> getSummary(Long recordId) {
+        MedicalRecord r = mapper.selectById(recordId);
+        if (r == null) throw new BusinessException(ErrorCode.NOT_FOUND);
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("recordId", r.getId());
+        result.put("parseStatus", r.getParseStatus());
+        result.put("fileType", r.getFileType());
+        result.put("recordDate", r.getRecordDate() != null ? r.getRecordDate().toString() : "");
+
+        try {
+            if (r.getParsedData() != null) {
+                Map<String, Object> parsed = objectMapper.readValue(r.getParsedData(), Map.class);
+                result.put("analysis", parsed.getOrDefault("analysis", "暂无分析结果"));
+                result.put("rawText", parsed.getOrDefault("raw_text", ""));
+                result.put("status", parsed.getOrDefault("status", "unknown"));
+            }
+        } catch (Exception e) {
+            result.put("analysis", "数据解析异常");
+        }
+
+        return result;
+    }
+
+    // ====== 基础 CRUD ======
 
     public List<MedicalRecord> listByPatient(Long userId, Long patientId) {
         return mapper.selectList(new LambdaQueryWrapper<MedicalRecord>()

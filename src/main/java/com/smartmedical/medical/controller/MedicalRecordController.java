@@ -67,6 +67,11 @@ public class MedicalRecordController {
         return ApiResponse.ok(service.getPresignedUrl(id));
     }
 
+    @GetMapping("/{id}/summary")
+    public ApiResponse<Map<String, Object>> getSummary(@PathVariable Long id) {
+        return ApiResponse.ok(service.getSummary(id));
+    }
+
     @PutMapping("/{id}/date")
     public ApiResponse<Void> updateDate(@PathVariable Long id, @RequestBody Map<String, Object> body) {
         service.updateDate(id, body);
