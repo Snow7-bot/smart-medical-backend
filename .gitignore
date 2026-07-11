@@ -1,0 +1,23 @@
+# 构建
+target/
+*.class
+*.jar
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.project
+.classpath
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 密钥（JWT签名密钥、数据库密码等，绝不提交）
+application-secret.yml
+
+# 日志
+logs/
+*.log
