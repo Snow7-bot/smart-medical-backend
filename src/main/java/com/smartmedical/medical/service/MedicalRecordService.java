@@ -76,11 +76,30 @@ public class MedicalRecordService {
             r.setParseStatus("processing");
             mapper.updateById(r);
 
-            // 1. 提取文本
-            String extractedText = extractText(r.getFileUrl());
+            // 1. 提取文本（出错会抛异常，里面带详细原因）
+            String extractedText;
+            try {
+                extractedText = extractText(r.getFileUrl());
+            } catch (Exception ex) {
+                String errMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                log.error("extractText 失败: {}", errMsg);
+                r.setParseStatus("failed");
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "ocr_failed",
+                    "summary", "OCR提取失败: " + errMsg,
+                    "fileType", r.getFileType()
+                )));
+                mapper.updateById(r);
+                return;
+            }
+
             if (extractedText == null || extractedText.isBlank()) {
                 r.setParseStatus("done");
-                r.setParsedData("{\"summary\":\"未能识别文件内容\",\"status\":\"no_text\"}");
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "no_text",
+                    "summary", "未能识别文件内容（文件类型: " + r.getFileType() + "，图片中可能没有文字）",
+                    "fileType", r.getFileType()
+                )));
                 mapper.updateById(r);
                 return;
             }
@@ -104,7 +123,12 @@ public class MedicalRecordService {
         } catch (Exception e) {
             log.error("病历分析失败", e);
             r.setParseStatus("failed");
-            r.setParsedData("{\"error\":\"分析失败\"}");
+            try {
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "error",
+                    "summary", "分析异常: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())
+                )));
+            } catch (Exception ignored) {}
             mapper.updateById(r);
         }
     }
@@ -113,11 +137,15 @@ public class MedicalRecordService {
     private String extractText(String fileUrl) throws IOException {
         File file = new File(uploadDir, fileUrl.substring("/uploads/".length()));
         String name = file.getName().toLowerCase();
+        log.info("extractText: url={}, diskPath={}, exists={}, name={}", fileUrl, file.getAbsolutePath(), file.exists(), name);
 
-        if (!file.exists()) return null;
+        if (!file.exists()) {
+            throw new IOException("文件不存在: " + file.getAbsolutePath());
+        }
 
         // PDF → PDFBox 提取
         if (name.endsWith(".pdf")) {
+            log.info("extractText: 使用PDFBox提取PDF");
             try (PDDocument doc = Loader.loadPDF(file)) {
                 PDFTextStripper stripper = new PDFTextStripper();
                 String text = stripper.getText(doc);
@@ -127,28 +155,81 @@ public class MedicalRecordService {
 
         // TXT → 直接读
         if (name.endsWith(".txt")) {
+            log.info("extractText: 直接读取TXT");
             return new String(java.nio.file.Files.readAllBytes(file.toPath()));
         }
 
-        // 图片 — 千问 VL OCR
+        // 图片 — 千问 VL OCR（内部失败会抛 IOException 带完整错误信息）
+        log.info("extractText: 调用千问VL OCR, fileSize={}", file.length());
         return qwenOcr.extractText(file);
     }
 
-    /** 触发重新解析 */
+    /** 触发重新解析 — 真正重新读取文件跑 OCR + AI */
     public MedicalRecord parse(Long recordId) {
         MedicalRecord r = mapper.selectById(recordId);
         if (r == null) throw new BusinessException(ErrorCode.NOT_FOUND);
-        r.setParseStatus("done");
-        try {
-            Map<String, Object> parsed = objectMapper.readValue(
-                    r.getParsedData() != null ? r.getParsedData() : "{}", Map.class);
-            parsed.put("status", "re-parsed");
-            r.setParsedData(objectMapper.writeValueAsString(parsed));
-        } catch (Exception e) {
-            r.setParsedData("{\"status\":\"parsed\"}");
-        }
-        mapper.updateById(r);
+        reAnalyze(r);
         return r;
+    }
+
+    /** 重新分析已有记录（读取磁盘文件） */
+    private void reAnalyze(MedicalRecord r) {
+        try {
+            r.setParseStatus("processing");
+            mapper.updateById(r);
+
+            String extractedText;
+            try {
+                extractedText = extractText(r.getFileUrl());
+            } catch (Exception ex) {
+                String errMsg = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+                log.error("reAnalyze extractText 失败 id={}: {}", r.getId(), errMsg);
+                r.setParseStatus("failed");
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "ocr_failed",
+                    "summary", "OCR提取失败: " + errMsg,
+                    "fileType", r.getFileType()
+                )));
+                mapper.updateById(r);
+                return;
+            }
+
+            if (extractedText == null || extractedText.isBlank()) {
+                r.setParseStatus("done");
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "no_text",
+                    "summary", "未能识别文件内容（文件类型: " + r.getFileType() + "，图片中可能没有文字）",
+                    "fileType", r.getFileType()
+                )));
+                mapper.updateById(r);
+                return;
+            }
+
+            String analysis = deepSeek.chat(
+                    "你是专业医学文档分析助手。请用通俗易懂的大白话，分析以下病历内容。按这个格式回复：" +
+                    "「主要问题」一句话概括；「重要发现」列出2-3个关键指标；「用药情况」列出涉及的药物；「建议」给出1-2条通俗建议。200字以内。",
+                    extractedText);
+
+            Map<String, Object> parsed = new LinkedHashMap<>();
+            parsed.put("status", "re-parsed");
+            parsed.put("analysis", analysis);
+            parsed.put("raw_text", extractedText.substring(0, Math.min(500, extractedText.length())));
+
+            r.setParsedData(objectMapper.writeValueAsString(parsed));
+            r.setParseStatus("done");
+            mapper.updateById(r);
+
+        } catch (Exception e) {
+            log.error("重新解析病历失败 id={}", r.getId(), e);
+            r.setParseStatus("failed");
+            try {
+                r.setParsedData(objectMapper.writeValueAsString(Map.of(
+                    "status", "error",
+                    "summary", "重新解析异常: " + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName())
+                )));
+            } catch (Exception ignored) {}
+            mapper.updateById(r);
+        }
     }
 
     /** 获取 AI 分析摘要 */
