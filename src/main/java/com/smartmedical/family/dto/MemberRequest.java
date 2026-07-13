@@ -14,7 +14,7 @@ public class MemberRequest {
     @NotBlank(message = "关系不能为空")
     private String relation;
 
-    private Integer gender;
+    private String gender;
     private LocalDate birthDate;
     private String avatarUrl;
 }

@@ -38,7 +38,7 @@ public class FamilyMemberServiceImpl implements FamilyMemberService {
         member.setUserId(userId);
         member.setName(request.getName());
         member.setRelation(request.getRelation());
-        member.setGender(request.getGender());
+        member.setGender(parseGender(request.getGender()));
         member.setBirthDate(request.getBirthDate());
         member.setAvatarUrl(request.getAvatarUrl());
         memberMapper.insert(member);
@@ -52,6 +52,15 @@ public class FamilyMemberServiceImpl implements FamilyMemberService {
             throw new BusinessException(ErrorCode.MEMBER_NOT_FOUND);
         }
         memberMapper.deleteById(memberId);
+    }
+
+    private Integer parseGender(String gender) {
+        if (gender == null) return 0;
+        return switch (gender.toUpperCase()) {
+            case "M", "MALE", "男", "1" -> 1;
+            case "F", "FEMALE", "女", "2" -> 2;
+            default -> 0;
+        };
     }
 
     @Override
