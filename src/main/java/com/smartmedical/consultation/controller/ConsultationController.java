@@ -22,7 +22,9 @@ public class ConsultationController {
         String message = (String) body.get("message");
         Long conversationId = body.get("conversationId") != null
                 ? Long.valueOf(body.get("conversationId").toString()) : null;
-        return ApiResponse.ok(service.chat(userId, message, conversationId));
+        Long patientId = body.get("patientId") != null
+                ? Long.valueOf(body.get("patientId").toString()) : null;
+        return ApiResponse.ok(service.chat(userId, message, conversationId, patientId));
     }
 
     @GetMapping("/consultation/history")
