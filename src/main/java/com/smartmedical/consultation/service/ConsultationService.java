@@ -122,6 +122,34 @@ public class ConsultationService {
         return result;
     }
 
+    /** 生成成员健康概览，在用户提问前主动输出 */
+    public Map<String, Object> getOverview(Long userId, Long patientId) {
+        Map<String, Object> result = new HashMap<>();
+        String ctx = buildMedicalContext(userId, patientId);
+        if (ctx.isEmpty() || ctx.equals("暂无相关健康记录。\n")) {
+            result.put("reply", "暂未找到该成员的健康记录。您可以先上传病历或录入健康指标，再使用AI问诊。");
+            return result;
+        }
+
+        String prompt = """
+            你是一位专业的家庭医生。请根据以下健康档案，用通俗易懂的大白话，
+            为该成员生成一份简洁的健康概览。按以下格式输出：
+
+            📋 **基本信息**：姓名、年龄、性别
+            💊 **用药情况**：正在服用的药物（如有）
+            📊 **健康指标**：最近的血压、血糖等关键数据（如有）
+            📄 **病历摘要**：历史病历的关键发现（如有）
+            ⚠️ **注意事项**：根据数据给出的1-2条健康建议
+
+            如果某项数据为空，直接跳过该项。整体控制在300字以内。
+            最后加一句：\n\n---\n*请描述您的具体症状，我会为您进一步分析。*
+            """;
+
+        String reply = deepSeek.chat(prompt, ctx);
+        result.put("reply", reply);
+        return result;
+    }
+
     private String buildMedicalContext(Long userId, Long patientId) {
         if (patientId == null || patientId == 0) return "";
         StringBuilder ctx = new StringBuilder();

@@ -27,6 +27,12 @@ public class ConsultationController {
         return ApiResponse.ok(service.chat(userId, message, conversationId, patientId));
     }
 
+    @GetMapping("/consultation/overview")
+    public ApiResponse<Map<String, Object>> overview(@AuthenticationPrincipal Long userId,
+                                                      @RequestParam Long patientId) {
+        return ApiResponse.ok(service.getOverview(userId, patientId));
+    }
+
     @GetMapping("/consultation/history")
     public ApiResponse<List<Map<String, Object>>> history(@AuthenticationPrincipal Long userId) {
         return ApiResponse.ok(service.getHistory(userId));
